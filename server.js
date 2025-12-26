@@ -29,8 +29,9 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.use(cors());
 app.use(express.json());
 
-// Simple JSON datastore
-const DATA_DIR = path.join(__dirname, 'data');
+// Simple JSON datastore (writes go to /tmp on Vercel; override with DATA_DIR)
+const defaultDataDir = process.env.VERCEL ? path.join('/tmp', 'data') : path.join(__dirname, 'data');
+const DATA_DIR = process.env.DATA_DIR || defaultDataDir;
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const REF_CODES_FILE = path.join(DATA_DIR, 'ref-codes.json');
 const APPROVALS_FILE = path.join(DATA_DIR, 'approvals.json');
@@ -392,17 +393,21 @@ app.get('/api/users', (_req, res) => {
   res.json(enriched);
 });
 
-app.listen(PORT, HOST, () => {
-  const addresses = Object.values(os.networkInterfaces())
-    .flat()
-    .filter(Boolean)
-    .filter(net => net.family === 'IPv4' && !net.internal)
-    .map(net => net.address);
-  console.log(`Server running at http://localhost:${PORT}`);
-  if (addresses.length) {
-    console.log('LAN access:');
-    for (const addr of addresses) {
-      console.log(`  http://${addr}:${PORT}`);
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, HOST, () => {
+    const addresses = Object.values(os.networkInterfaces())
+      .flat()
+      .filter(Boolean)
+      .filter(net => net.family === 'IPv4' && !net.internal)
+      .map(net => net.address);
+    console.log(`Server running at http://localhost:${PORT}`);
+    if (addresses.length) {
+      console.log('LAN access:');
+      for (const addr of addresses) {
+        console.log(`  http://${addr}:${PORT}`);
+      }
     }
-  }
-});
+  });
+}
