@@ -9,14 +9,45 @@ const __dirname = path.dirname(__filename);
 const defaultDataDir = process.env.VERCEL ? path.join('/tmp', 'data') : path.join(__dirname, 'data');
 const DATA_DIR = process.env.DATA_DIR || defaultDataDir;
 
-const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_REST_URL || process.env.UPSTASH_REDIS_URL;
+const redisUrl = process.env.REDIS_URL || process.env.UPSTASH_REDIS_URL || null;
+const upstashRestUrl = process.env.UPSTASH_REDIS_REST_URL || null;
+const upstashRestToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.UPSTASH_REST_TOKEN || null;
+
 let redisClient = null;
+let restClient = null;
+let STORAGE_MODE = 'file';
+
 if (redisUrl) {
   redisClient = new Redis(redisUrl, { lazyConnect: true, tls: redisUrl.startsWith('rediss://') ? {} : undefined });
   redisClient.connect().catch(err => {
-    console.warn('Redis connect failed, falling back to file storage:', err?.message || err);
+    console.warn('Redis connect failed, falling back to file/REST storage:', err?.message || err);
     redisClient = null;
   });
+  STORAGE_MODE = 'redis';
+}
+
+if (!redisClient && upstashRestUrl && upstashRestToken) {
+  restClient = {
+    async cmd(cmdArr) {
+      const resp = await fetch(upstashRestUrl, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${upstashRestToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(cmdArr)
+      });
+      if (!resp.ok) throw new Error(`Upstash REST ${resp.status}`);
+      const data = await resp.json();
+      if (data.error) throw new Error(data.error);
+      return data.result;
+    }
+  };
+  STORAGE_MODE = 'upstash-rest';
+}
+
+if (!redisClient && !restClient) {
+  STORAGE_MODE = 'file';
 }
 
 const FILES = {
@@ -65,9 +96,34 @@ async function writeRedisJson(key, value) {
   }
 }
 
+async function readRestJson(key, fallback) {
+  if (!restClient) return fallback;
+  try {
+    const raw = await restClient.cmd(['GET', `staking:${key}`]);
+    if (!raw) return fallback;
+    return JSON.parse(raw);
+  } catch (err) {
+    console.warn(`Upstash read error for ${key}:`, err?.message || err);
+    return fallback;
+  }
+}
+
+async function writeRestJson(key, value) {
+  if (!restClient) return;
+  try {
+    await restClient.cmd(['SET', `staking:${key}`, JSON.stringify(value)]);
+  } catch (err) {
+    console.warn(`Upstash write error for ${key}:`, err?.message || err);
+  }
+}
+
 const readJson = async (key, fallback) => {
   if (redisClient) {
     const val = await readRedisJson(key, undefined);
+    if (val !== undefined) return val;
+  }
+  if (restClient) {
+    const val = await readRestJson(key, undefined);
     if (val !== undefined) return val;
   }
   const fileVal = await readFileJson(key, fallback);
@@ -76,6 +132,7 @@ const readJson = async (key, fallback) => {
 
 const writeJson = async (key, value) => {
   if (redisClient) await writeRedisJson(key, value);
+  else if (restClient) await writeRestJson(key, value);
   await writeFileJson(key, value);
 };
 
@@ -90,4 +147,4 @@ export const storage = {
   writeCountdownOverride: (v) => writeJson('countdownOverride', v)
 };
 
-export const STORAGE_MODE = redisClient ? 'redis' : 'file';
+export { STORAGE_MODE };
