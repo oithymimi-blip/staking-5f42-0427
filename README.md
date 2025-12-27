@@ -9,9 +9,10 @@ Minimal Express backend plus static frontend (served from `public/`). The API wr
 
 ## Environment variables
 Set these in Vercel or a local `.env`:
-- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `EMAIL_TO` (email notifications)
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, `EMAIL_FROM`, `EMAIL_TO` (email notifications; optional)
 - `COUNTDOWN_END_DATE` and `COUNTDOWN_FALLBACK_DAYS` (optional)
 - `DATA_DIR` (optional; defaults to `/tmp/data` on Vercel or `./data` locally)
+- `REDIS_URL` (or `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_URL`) to persist admin data in Redis; otherwise Vercel’s file system resets on redeploy/idle
 
 ## Deploy to Vercel
 The repo includes `vercel.json` so you can import directly:

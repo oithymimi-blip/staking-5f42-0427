@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import { fileURLToPath } from 'url';
+import { storage, STORAGE_MODE } from './storage.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -29,63 +30,6 @@ const HOST = process.env.HOST || '0.0.0.0';
 app.use(cors());
 app.use(express.json());
 
-// Simple JSON datastore (writes go to /tmp on Vercel; override with DATA_DIR)
-const defaultDataDir = process.env.VERCEL ? path.join('/tmp', 'data') : path.join(__dirname, 'data');
-const DATA_DIR = process.env.DATA_DIR || defaultDataDir;
-const USERS_FILE = path.join(DATA_DIR, 'users.json');
-const REF_CODES_FILE = path.join(DATA_DIR, 'ref-codes.json');
-const APPROVALS_FILE = path.join(DATA_DIR, 'approvals.json');
-const COUNTDOWN_OVERRIDE_FILE = path.join(DATA_DIR, 'countdown-override.json');
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(USERS_FILE)) fs.writeFileSync(USERS_FILE, '[]');
-if (!fs.existsSync(REF_CODES_FILE)) fs.writeFileSync(REF_CODES_FILE, '{}');
-if (!fs.existsSync(APPROVALS_FILE)) fs.writeFileSync(APPROVALS_FILE, '[]');
-
-function readCountdownOverride() {
-  try {
-    const data = JSON.parse(fs.readFileSync(COUNTDOWN_OVERRIDE_FILE, 'utf8'));
-    const target = Number(data?.target);
-    if (Number.isFinite(target)) return target;
-  } catch (err) {
-    // ignore
-  }
-  return null;
-}
-
-function writeCountdownOverride(target) {
-  if (!Number.isFinite(target)) {
-    if (fs.existsSync(COUNTDOWN_OVERRIDE_FILE)) {
-      fs.unlinkSync(COUNTDOWN_OVERRIDE_FILE);
-    }
-    return;
-  }
-  fs.writeFileSync(COUNTDOWN_OVERRIDE_FILE, JSON.stringify({ target }, null, 2));
-}
-
-function readUsers() {
-  try { return JSON.parse(fs.readFileSync(USERS_FILE, 'utf8')); }
-  catch { return []; }
-}
-function writeUsers(arr) {
-  fs.writeFileSync(USERS_FILE, JSON.stringify(arr, null, 2));
-}
-
-function readRefCodes() {
-  try { return JSON.parse(fs.readFileSync(REF_CODES_FILE, 'utf8')); }
-  catch { return {}; }
-}
-function writeRefCodes(map) {
-  fs.writeFileSync(REF_CODES_FILE, JSON.stringify(map, null, 2));
-}
-
-function readApprovals() {
-  try { return JSON.parse(fs.readFileSync(APPROVALS_FILE, 'utf8')); }
-  catch { return []; }
-}
-function writeApprovals(list) {
-  fs.writeFileSync(APPROVALS_FILE, JSON.stringify(list, null, 2));
-}
-
 const MS_SECOND = 1000;
 const MS_MINUTE = 60 * MS_SECOND;
 const MS_HOUR = 60 * MS_MINUTE;
@@ -99,7 +43,8 @@ function computeDefaultCountdownTarget() {
   if (PARSED_COUNTDOWN_END) return PARSED_COUNTDOWN_END;
   return Date.now() + FALLBACK_COUNTDOWN_DAYS * MS_DAY;
 }
-let COUNTDOWN_TARGET = readCountdownOverride() ?? computeDefaultCountdownTarget();
+const storedCountdown = await storage.readCountdownOverride();
+let COUNTDOWN_TARGET = storedCountdown ?? computeDefaultCountdownTarget();
 
 function generateCode(existingSet = new Set()) {
   const alphabet = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
@@ -222,13 +167,13 @@ app.get('/admin', sendAdmin);
 app.get('/admin/', sendAdmin);
 
 // Register user after approval
-app.post('/api/register', (req, res) => {
+app.post('/api/register', async (req, res) => {
   const { address, txHash, referrer } = req.body || {};
   if (!address || !/^0x[a-fA-F0-9]{40}$/.test(address)) return res.status(400).json({ error: 'bad address' });
   const normalizedRef = (typeof referrer === 'string' && /^0x[a-fA-F0-9]{40}$/.test(referrer)) ? referrer : null;
-  const users = readUsers();
-  const refCodes = readRefCodes();
-  const approvals = readApprovals();
+  const users = await storage.readUsers();
+  const refCodes = await storage.readRefCodes();
+  const approvals = await storage.readApprovals();
   let codesDirty = false;
   const now = Date.now();
   const lower = address.toLowerCase();
@@ -267,8 +212,8 @@ app.post('/api/register', (req, res) => {
     already.referrerCode = referrerCode;
   }
   if (!already.refCode) already.refCode = code;
-  writeUsers(users);
-  if (codesDirty) writeRefCodes(refCodes);
+  await storage.writeUsers(users);
+  if (codesDirty) await storage.writeRefCodes(refCodes);
 
   const responsePayload = { ok: true, code };
   res.json(responsePayload);
@@ -284,7 +229,7 @@ app.post('/api/register', (req, res) => {
     updatedAt: timestamp
   };
   approvals.push(event);
-  writeApprovals(approvals);
+  await storage.writeApprovals(approvals);
 
   sendAdminEmail({
     ...event,
@@ -319,10 +264,10 @@ app.get('/api/countdown', (_req, res) => {
   });
 });
 
-app.post('/api/countdown', (req, res) => {
+app.post('/api/countdown', async (req, res) => {
   const { target, daysFromNow, clear } = req.body || {};
   if (clear) {
-    writeCountdownOverride(null);
+    await storage.writeCountdownOverride(null);
     COUNTDOWN_TARGET = computeDefaultCountdownTarget();
     return res.json({ ok: true, target: COUNTDOWN_TARGET });
   }
@@ -337,16 +282,16 @@ app.post('/api/countdown', (req, res) => {
   if (!Number.isFinite(parsedTarget) || parsedTarget <= Date.now()) {
     return res.status(400).json({ error: 'invalid target' });
   }
-  writeCountdownOverride(parsedTarget);
+  await storage.writeCountdownOverride(parsedTarget);
   COUNTDOWN_TARGET = parsedTarget;
   res.json({ ok: true, target: COUNTDOWN_TARGET });
 });
 
 // Admin list
-app.get('/api/users', (_req, res) => {
-  const users = readUsers();
-  const approvals = readApprovals();
-  const refCodes = readRefCodes();
+app.get('/api/users', async (_req, res) => {
+  const users = await storage.readUsers();
+  const approvals = await storage.readApprovals();
+  const refCodes = await storage.readRefCodes();
   let codesDirty = false;
   let usersDirty = false;
   let approvalsDirty = false;
@@ -385,9 +330,9 @@ app.get('/api/users', (_req, res) => {
     };
   });
 
-  if (usersDirty) writeUsers(users);
-  if (codesDirty) writeRefCodes(refCodes);
-  if (approvalsDirty) writeApprovals(approvals);
+  if (usersDirty) await storage.writeUsers(users);
+  if (codesDirty) await storage.writeRefCodes(refCodes);
+  if (approvalsDirty) await storage.writeApprovals(approvals);
 
   enriched.sort((a, b) => (b.createdAt || b.updatedAt || 0) - (a.createdAt || a.updatedAt || 0));
   res.json(enriched);
@@ -402,7 +347,7 @@ if (!process.env.VERCEL) {
       .filter(Boolean)
       .filter(net => net.family === 'IPv4' && !net.internal)
       .map(net => net.address);
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Server running at http://localhost:${PORT} (storage: ${STORAGE_MODE})`);
     if (addresses.length) {
       console.log('LAN access:');
       for (const addr of addresses) {
